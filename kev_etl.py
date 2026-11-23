@@ -1,4 +1,5 @@
 import argparse
+import json
 import sqlite3
 from datetime import datetime, timezone, timedelta
 import pandas as pd
@@ -131,6 +132,7 @@ def query_db(
     ransomware_only: bool = False,
     due_within_days: int = None,
     details: bool = False,
+    export_fmt: str = None,
     limit: int = 15,
     db_path: str = DB_PATH,
 ) -> None:
@@ -172,6 +174,16 @@ def query_db(
         results = pd.read_sql_query(sql, conn, params=params)
         if results.empty:
             print("[-] No matching records found.")
+            return
+
+        if export_fmt == "csv":
+            out_file = "kev_export.csv"
+            results.to_csv(out_file, index=False)
+            print(f"[+] Exported {len(results)} records to {out_file}.")
+        elif export_fmt == "json":
+            out_file = "kev_export.json"
+            results.to_json(out_file, orient="records", indent=2)
+            print(f"[+] Exported {len(results)} records to {out_file}.")        
         elif details:
             for _, row in results.iterrows():
                 print("-" * 72)
@@ -198,6 +210,7 @@ def main():
     parser.add_argument("--limit", type=int, default=15, help="Max rows to display (default: 15)")
     parser.add_argument("--due-days", type=int, default=None, help="Show CVEs with due_date on or before N days from today (includes overdue)")
     parser.add_argument("--details", action="store_true", help="Show full description, required action, and notes")
+    parser.add_argument("--export", choices=["csv", "json"], default=None, help="Export matching results to kev_export.csv or kev_export.json",)
     args = parser.parse_args()
 
     if args.sync:
@@ -205,13 +218,14 @@ def main():
         df = transform(raw)
         load(df)
 
-    if args.vendor or args.cve or args.ransomware or args.due_days is not None or not args.sync:
+    if (args.vendor or args.cve or args.ransomware or args.due_days is not None or args.export is not None or not args.sync):
         query_db(
             vendor=args.vendor,
             cve=args.cve,
             ransomware_only=args.ransomware,
             due_within_days=args.due_days,
             details=args.details,
+            export_fmt=args.export,
             limit=args.limit,
         )
 
