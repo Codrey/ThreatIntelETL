@@ -153,13 +153,21 @@ def query_db(
             params.append(cutoff_date)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_by = "due_date ASC, date_added DESC" if due_within_days is not None else "date_added DESC"
         sql = f"""
-            SELECT cve_id, date_added, vendor, product, ransomware_use
+            SELECT cve_id, date_added, due_date, vendor, product, ransomware_use
             FROM cisa_kev
             {where_sql}
-            ORDER BY date_added DESC
+            ORDER BY {order_by}
             LIMIT ?;
         """
+        # sql = f"""
+        #     SELECT cve_id, date_added, vendor, product, ransomware_use
+        #     FROM cisa_kev
+        #     {where_sql}
+        #     ORDER BY date_added DESC
+        #     LIMIT ?;
+        # """
 
         params.append(limit)
 
