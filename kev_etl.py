@@ -1,6 +1,6 @@
 import argparse
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import requests
 
@@ -125,7 +125,14 @@ def load(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
     finally:
         conn.close()
 
-def query_db(vendor: str = None, cve: str = None, ransomware_only: bool = False, limit: int = 15) -> None:
+def query_db(
+        vendor: str = None, 
+        cve: str = None, 
+        ransomware_only: bool = False,
+        due_within_days: int = None,
+        limit: int = 15,
+        db_path: str = DB_PATH,
+        ) -> None:
     """run quick SOC triage queries against the local SQLite database."""
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -140,6 +147,10 @@ def query_db(vendor: str = None, cve: str = None, ransomware_only: bool = False,
             params.append(cve.upper())
         if ransomware_only:
             clauses.append("LOWER(ransomware_use) = 'known'")
+        if due_within_days is not None:
+            cutoff_date = (datetime.now(timezone.utc) + timedelta(days=due_within_days)).strftime("%Y-%m-%d")
+            clauses.append("due_date != '' AND due_date <= ?")
+            params.append(cutoff_date)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"""
@@ -167,6 +178,7 @@ def main():
     parser.add_argument("--cve", type=str, help="Look up a specific CVE ID (e.g., CVE-2024-21413)")
     parser.add_argument("--ransomware", action="store_true", help="Show only CVEs with known ransomware use")
     parser.add_argument("--limit", type=int, default=15, help="Max rows to display (default: 15)")
+    parser.add_argument("--due-days", type=int, default=None, help="Show CVEs with due_date on or before N days from today (includes overdue)")
     args = parser.parse_args()
 
     if args.sync:
@@ -175,7 +187,13 @@ def main():
         load(df)
 
     if args.vendor or args.cve or args.ransomware or not args.sync:
-        query_db(vendor=args.vendor, cve=args.cve, ransomware_only=args.ransomware, limit=args.limit)
+        query_db(
+            vendor=args.vendor, 
+            cve=args.cve, 
+            ransomware_only=args.ransomware,
+            due_within_days=args.due_days,
+            limit=args.limit,
+            )
 
 if __name__ == "__main__":
     main()
