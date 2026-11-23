@@ -337,6 +337,14 @@ def main():
         raw = extract()
         df = transform(raw)
         load(df)
+        # for when no ABUSECH_AUTH_KEY is set
+        if args.threatfox:
+            if not ABUSECH_AUTH_KEY:
+                print("[-] Skipping ThreatFox sync: ABUSECH_AUTH_KEY is not set.")
+            else:
+                tf_raw = extract_threatfox(days=args.days)
+                tf_df = transform_threatfox(tf_raw)
+                load_threatfox(tf_df)
 
     if (args.vendor or args.cve or args.ransomware or args.due_days is not None or args.export is not None or not args.sync):
         query_db(
@@ -348,9 +356,6 @@ def main():
             export_fmt=args.export,
             limit=args.limit,
         )
-
-    if args.threatfox and not ABUSECH_AUTH_KEY:
-        print("[-] Skipping ThreatFox sync: ABUSECH_AUTH_KEY is not set.")
         
 if __name__ == "__main__":
     main()
