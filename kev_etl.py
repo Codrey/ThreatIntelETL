@@ -4,10 +4,12 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import requests
+import os
 
 CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 DB_PATH = "threat_intel.db"
-
+THREATFOX_API_URL = "https://threatfox-api.abuse.ch/api/v1/"
+ABUSECH_AUTH_KEY = os.getenv("ABUSECH_AUTH_KEY", "").strip()
 
 def extract(url: str = CISA_KEV_URL) -> dict:
     """fetch raw JSON payload from the CISA KEV feed."""
@@ -80,6 +82,122 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS  idx_vendor ON cisa_kev(vendor);")
     conn.execute("CREATE INDEX IF NOT EXISTS  idx_date_added ON cisa_kev(date_added);")
     conn.commit()
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS threatfox_iocs (
+            ioc_id          TEXT PRIMARY KEY,
+            ioc_value       TEXT NOT NULL,
+            ioc_type        TEXT NOT NULL,
+            threat_type     TEXT,
+            malware         TEXT,
+            confidence      TEXT,
+            first_seen      TEXT,
+            reporter        TEXT,
+            tags            TEXT,
+            ingested_at     TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tf_ioc_value ON threatfox_iocs(ioc_value);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tf_malware ON threatfox_iocs(malware);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tf_first_seen ON threatfox_iocs(first_seen);")
+
+def extract_threatfox(days: int = 3, url: str = THREATFOX_API_URL) -> dict:
+    """Fetch recent IOCs from ThreatFox API (days: 1 to 7)."""
+    if not ABUSECH_AUTH_KEY:
+        raise ValueError("ABUSECH_AUTH_KEY environment variable is not set.")
+    print(f"[*] Extracting ThreatFox IOCs (last {days} days) from {url} ...")
+    headers = {"Auth-Key": ABUSECH_AUTH_KEY}
+    resp = requests.post(url, json={"query": "get_iocs", "days": max(1, min(days, 7))}, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+def transform_threatfox(raw_data: dict) -> pd.DataFrame:
+    """Normalize and deduplicate ThreatFox IOC records using Pandas."""
+    if raw_data.get("query_status") != "ok":
+        raise ValueError(f"ThreatFox API returned status: {raw_data.get('query_status')}")
+    iocs = raw_data.get("data") or []
+    if not iocs:
+        return pd.DataFrame(
+            columns=[
+                "ioc_id", "ioc_value", "ioc_type", "threat_type",
+                "malware", "confidence", "first_seen", "reporter", "tags", "ingested_at",
+            ]
+        )
+
+    df = pd.DataFrame(iocs)
+    column_map = {
+        "id": "ioc_id",
+        "ioc": "ioc_value",
+        "ioc_type": "ioc_type",
+        "threat_type": "threat_type",
+        "malware_printable": "malware",
+        "confidence_level": "confidence",
+        "first_seen_utc": "first_seen",
+        "reporter": "reporter",
+        "tags": "tags",
+    }
+    df = df.rename(columns=column_map)
+
+    expected_cols = [
+        "ioc_id", "ioc_value", "ioc_type", "threat_type",
+        "malware", "confidence", "first_seen", "reporter", "tags",
+    ]
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[expected_cols].copy()
+
+    for col in expected_cols:
+        df[col] = df[col].apply(
+            lambda v: ", ".join(str(x) for x in v) if isinstance(v, list) else ("" if v is None else str(v).strip())
+        )
+
+    df = df[df["ioc_id"] != ""].drop_duplicates(subset=["ioc_id"], keep="last")
+    df["ingested_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[*] Transformed {len(df)} unique ThreatFox IOC records.")
+    return df
+
+
+def load_threatfox(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
+    """Upsert ThreatFox IOC records into threat_intel.db and report new IOCs."""
+    conn = sqlite3.connect(db_path)
+    try:
+        init_db(conn)
+        existing_ids = {
+            row[0] for row in conn.execute("SELECT ioc_id FROM threatfox_iocs;").fetchall()
+        }
+        new_df = df[~df["ioc_id"].isin(existing_ids)]
+        records = df.to_dict(orient="records")
+
+        conn.executemany(
+            """
+            INSERT INTO threatfox_iocs (
+                ioc_id, ioc_value, ioc_type, threat_type,
+                malware, confidence, first_seen, reporter, tags, ingested_at
+            ) VALUES (
+                :ioc_id, :ioc_value, :ioc_type, :threat_type,
+                :malware, :confidence, :first_seen, :reporter, :tags, :ingested_at
+            )
+            ON CONFLICT(ioc_id) DO UPDATE SET
+                ioc_value   = excluded.ioc_value,
+                ioc_type    = excluded.ioc_type,
+                threat_type = excluded.threat_type,
+                malware     = excluded.malware,
+                confidence  = excluded.confidence,
+                first_seen  = excluded.first_seen,
+                reporter    = excluded.reporter,
+                tags        = excluded.tags,
+                ingested_at = excluded.ingested_at;
+            """,
+            records,
+        )
+        conn.commit()
+        print(f"[+] Upserted {len(records)} ThreatFox IOCs into {db_path}.")
+        print(f"[+] New IOCs added this run: {len(new_df)}")
+    finally:
+        conn.close()
 
 def load(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
     """Upsert cleaned records into the local SQLite database and report new CVEs."""
@@ -211,6 +329,8 @@ def main():
     parser.add_argument("--due-days", type=int, default=None, help="Show CVEs with due_date on or before N days from today (includes overdue)")
     parser.add_argument("--details", action="store_true", help="Show full description, required action, and notes")
     parser.add_argument("--export", choices=["csv", "json"], default=None, help="Export matching results to kev_export.csv or kev_export.json",)
+    parser.add_argument("--threatfox", action="store_true", help="Include ThreatFox recent IOCs on sync")
+    parser.add_argument("--days", type=int, default=3, help="ThreatFox lookback window in days (1-7, default: 3)")
     args = parser.parse_args()
 
     if args.sync:
@@ -229,5 +349,8 @@ def main():
             limit=args.limit,
         )
 
+    if args.threatfox and not ABUSECH_AUTH_KEY:
+        print("[-] Skipping ThreatFox sync: ABUSECH_AUTH_KEY is not set.")
+        
 if __name__ == "__main__":
     main()
