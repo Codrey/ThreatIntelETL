@@ -81,11 +81,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 def load(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
-    """upsert cleaned records into the local SQLite database."""
+    """Upsert cleaned records into the local SQLite database and report new CVEs."""
     conn = sqlite3.connect(db_path)
     try:
         init_db(conn)
-        records = df.to_dict(orient="records")
+
+        existing_ids = {
+            row[0] for row in conn.execute("SELECT cve_id FROM cisa_kev;").fetchall()
+        }
+        incoming_df = df.copy()
+        new_df = incoming_df[~incoming_df["cve_id"].isin(existing_ids)]
+
+        records = incoming_df.to_dict(orient="records")
         conn.executemany(
             """
             INSERT INTO cisa_kev (
@@ -110,7 +117,11 @@ def load(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
             records,
         )
         conn.commit()
-        print(f"[+] Load {len(records)} records into {db_path}.")
+
+        print(f"[+] Upserted {len(records)} total records into {db_path}.")
+        print(f"[+] New CVEs added this run: {len(new_df)}")
+        if not new_df.empty:
+            print(new_df[["cve_id", "date_added", "vendor", "product", "ransomware_use"]].to_string(index=False))
     finally:
         conn.close()
 
