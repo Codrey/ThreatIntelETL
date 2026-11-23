@@ -126,15 +126,16 @@ def load(df: pd.DataFrame, db_path: str = DB_PATH) -> None:
         conn.close()
 
 def query_db(
-        vendor: str = None, 
-        cve: str = None, 
-        ransomware_only: bool = False,
-        due_within_days: int = None,
-        limit: int = 15,
-        db_path: str = DB_PATH,
-        ) -> None:
-    """run quick SOC triage queries against the local SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
+    vendor: str = None,
+    cve: str = None,
+    ransomware_only: bool = False,
+    due_within_days: int = None,
+    details: bool = False,
+    limit: int = 15,
+    db_path: str = DB_PATH,
+) -> None:
+    """Run quick SOC triage queries against the local SQLite database."""
+    conn = sqlite3.connect(db_path)
     try:
         clauses = []
         params = []
@@ -154,26 +155,35 @@ def query_db(
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order_by = "due_date ASC, date_added DESC" if due_within_days is not None else "date_added DESC"
+        cols = (
+            "cve_id, date_added, due_date, vendor, product, vuln_name, ransomware_use, description, required_action, notes"
+            if details
+            else "cve_id, date_added, due_date, vendor, product, ransomware_use"
+        )
         sql = f"""
-            SELECT cve_id, date_added, due_date, vendor, product, ransomware_use
+            SELECT {cols}
             FROM cisa_kev
             {where_sql}
             ORDER BY {order_by}
             LIMIT ?;
         """
-        # sql = f"""
-        #     SELECT cve_id, date_added, vendor, product, ransomware_use
-        #     FROM cisa_kev
-        #     {where_sql}
-        #     ORDER BY date_added DESC
-        #     LIMIT ?;
-        # """
-
         params.append(limit)
 
         results = pd.read_sql_query(sql, conn, params=params)
         if results.empty:
             print("[-] No matching records found.")
+        elif details:
+            for _, row in results.iterrows():
+                print("-" * 72)
+                print(f"CVE:             {row['cve_id']} | Ransomware: {row['ransomware_use']}")
+                print(f"Vendor/Product:  {row['vendor']} — {row['product']}")
+                print(f"Name:            {row['vuln_name']}")
+                print(f"Added / Due:     {row['date_added']} / {row['due_date'] or 'N/A'}")
+                print(f"Description:     {row['description']}")
+                print(f"Required Action: {row['required_action']}")
+                if row["notes"]:
+                    print(f"Notes:           {row['notes']}")
+            print("-" * 72)
         else:
             print(results.to_string(index=False))
     finally:
@@ -187,6 +197,7 @@ def main():
     parser.add_argument("--ransomware", action="store_true", help="Show only CVEs with known ransomware use")
     parser.add_argument("--limit", type=int, default=15, help="Max rows to display (default: 15)")
     parser.add_argument("--due-days", type=int, default=None, help="Show CVEs with due_date on or before N days from today (includes overdue)")
+    parser.add_argument("--details", action="store_true", help="Show full description, required action, and notes")
     args = parser.parse_args()
 
     if args.sync:
@@ -194,14 +205,15 @@ def main():
         df = transform(raw)
         load(df)
 
-    if args.vendor or args.cve or args.ransomware or not args.sync:
+    if args.vendor or args.cve or args.ransomware or args.due_days is not None or not args.sync:
         query_db(
-            vendor=args.vendor, 
-            cve=args.cve, 
+            vendor=args.vendor,
+            cve=args.cve,
             ransomware_only=args.ransomware,
             due_within_days=args.due_days,
+            details=args.details,
             limit=args.limit,
-            )
+        )
 
 if __name__ == "__main__":
     main()
